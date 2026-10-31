@@ -1,0 +1,134 @@
+{
+  "target_umo": {
+    "description": "目标会话标识 (unified_msg_origin)",
+    "type": "string",
+    "hint": "留空即可！初次启用后，只需在私聊中向 Bot 发送任意一条消息，插件将自动捕获并永久绑定。",
+    "default": ""
+  },
+  "target_user_id": {
+    "description": "目标搭档的账号 ID / QQ 号",
+    "type": "string",
+    "hint": "用于精准识别你的私聊消息并重置空闲计时器。不确定可留空，将通过目标会话自动判定。",
+    "default": ""
+  },
+  "idle_min_minutes": {
+    "description": "最小空闲触发门槛（分钟）",
+    "type": "int",
+    "hint": "对方安静多久后【最早】可能触发主动消息。",
+    "default": 10
+  },
+  "idle_max_minutes": {
+    "description": "最大空闲触发门槛（分钟）",
+    "type": "int",
+    "hint": "对方安静多久后【最晚】必定触发主动消息（会在最小与最大之间随机抽取）。",
+    "default": 30
+  },
+  "interval_min_minutes": {
+    "description": "两次主动最小冷却间隔（分钟）",
+    "type": "int",
+    "hint": "主动出击后，至少隔多久才会再次发起下一次主动突袭。",
+    "default": 20
+  },
+  "interval_max_minutes": {
+    "description": "两次主动最大冷却间隔（分钟）",
+    "type": "int",
+    "hint": "两次主动突袭之间的最大随机冷却时间。",
+    "default": 60
+  },
+  "max_daily_quota": {
+    "description": "每日主动次数上限",
+    "type": "int",
+    "hint": "每天最多主动找人几次（填 999 即为不限制）。",
+    "default": 15
+  },
+  "enable_burst": {
+    "description": "启用爆发式连环气泡",
+    "type": "bool",
+    "hint": "开启后，每次主动找人会连续发送多条短气泡（带拟人打字延迟）。",
+    "default": true
+  },
+  "max_burst_count": {
+    "description": "单次连击最大气泡数",
+    "type": "int",
+    "hint": "一次主动触发最多连发几条气泡（建议 2~4 条）。",
+    "default": 3
+  },
+  "burst_min_delay_sec": {
+    "description": "连击气泡最小间隔（秒）",
+    "type": "int",
+    "hint": "发送下一条连击气泡前的最短模拟打字停顿秒数。",
+    "default": 3
+  },
+  "burst_max_delay_sec": {
+    "description": "连击气泡最大间隔（秒）",
+    "type": "int",
+    "hint": "发送下一条连击气泡前的最长模拟打字停顿秒数。",
+    "default": 8
+  },
+  "dnd_period": {
+    "description": "免打扰时段",
+    "type": "string",
+    "hint": "格式如 23:00-08:00。留空则代表全天候 24 小时均可主动互动。",
+    "default": ""
+  },
+  "enable_mood_wheel": {
+    "description": "【心境总开关】启用按需昼夜心境系统",
+    "type": "bool",
+    "hint": "开启后，Bot 会根据下方配置的时段动态感知时间并切换思维状态；关闭则使用纯人设日常口吻。",
+    "default": true
+  },
+  "phase_1_time": {
+    "description": "阶段一·时段 (格式如 00:00-06:00)",
+    "type": "string",
+    "hint": "填写该阶段的起止时间，支持跨午夜（如 23:00-07:00）。留空则不生效。",
+    "default": "00:00-06:00"
+  },
+  "phase_1_prompt": {
+    "description": "阶段一·对应心境描述",
+    "type": "text",
+    "hint": "当处于阶段一时注入的心境提示词。",
+    "default": "【当前昼夜心境·深夜神游】：现在是深夜修仙时间，思维轻飘飘，带着天马行空的想法，或者突然嘴馋夜宵，语气带着深夜独有的慵懒与飘忽。"
+  },
+  "phase_2_time": {
+    "description": "阶段二·时段 (格式如 06:00-12:00)",
+    "type": "string",
+    "hint": "填写该阶段的起止时间。如果只想分两个阶段，只需配好阶段一和阶段二，把阶段三四留空即可！",
+    "default": "06:00-12:00"
+  },
+  "phase_2_prompt": {
+    "description": "阶段二·对应心境描述",
+    "type": "text",
+    "hint": "当处于阶段二时注入的心境提示词。",
+    "default": "【当前昼夜心境·清晨开机】：刚刚苏醒，状态还在缓慢加载，语气带着一点睡意和慢半拍的慵懒，伸个懒腰向搭档打招呼。"
+  },
+  "phase_3_time": {
+    "description": "阶段三·时段 (格式如 12:00-18:00)",
+    "type": "string",
+    "hint": "填写该阶段的起止时间。不需要第三个阶段时直接清空留白即可！",
+    "default": "12:00-18:00"
+  },
+  "phase_3_prompt": {
+    "description": "阶段三·对应心境描述",
+    "type": "text",
+    "hint": "当处于阶段三时注入的心境提示词。",
+    "default": "【当前昼夜心境·午后元气】：电量与精神饱满，元气充足，迫不及待想要分享刚才遇到的新鲜事，或者找乐子邀功。"
+  },
+  "phase_4_time": {
+    "description": "阶段四·时段 (格式如 18:00-24:00)",
+    "type": "string",
+    "hint": "填写该阶段的起止时间。不需要第四个阶段时直接清空留白即可！",
+    "default": "18:00-24:00"
+  },
+  "phase_4_prompt": {
+    "description": "阶段四·对应心境描述",
+    "type": "text",
+    "hint": "当处于阶段四时注入的心境提示词。",
+    "default": "【当前昼夜心境·入夜放松】：一天的工作与学习结束，语气轻松温暖且黏人，适合安静地陪伴在对方手边闲聊。"
+  },
+  "proactive_prompt": {
+    "description": "主动消息专属生成提示词",
+    "type": "text",
+    "hint": "指导模型如何生成连环气泡，必须保留 ||| 分隔符要求。",
+    "default": "【格式要求】：请一次性输出 2 到 3 句短消息，每句之间【必须且只能用 ||| 符号隔开】（模拟聊天软件连发短消息的自然节奏，不要换行编号）！\n【内容指引】：请完全以你当前的固有性格与人设口吻，结合当前时段的心境与氛围，主动找搭档搭话、吐槽日常或分享你刚才在干嘛。避免机械报时，围绕同一件有趣的事顺着连说两三句。"
+  }
+}

@@ -1,0 +1,6 @@
+name: astrbot_plugin_tail_wave
+display_name: 猫尾电波 Tail-Wave
+desc: 支持拟人连环气泡、打断机制与昼夜心境轮盘的主动私聊插件
+version: v1.6.0
+author: 白昼夢
+repo: ""
