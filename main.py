@@ -15,7 +15,7 @@ from astrbot.api.star import Context, Star, register
     "astrbot_plugin_tail_wave",
     "白昼夢",
     "支持拟人连环气泡、打断机制与昼夜心境轮盘的主动私聊插件",
-    "1.6.0",
+    "1.6.1",
 )
 class TailWavePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -25,6 +25,11 @@ class TailWavePlugin(Star):
         # 基础通信与白名单配置（脱敏通用化）
         self.target_umo: str = str(self.config.get("target_umo", "")).strip()
         self.target_user_id: str = str(self.config.get("target_user_id", "")).strip()
+
+        # 防止配置中误填入群聊 UMO
+        if "GroupMessage" in self.target_umo or ":group:" in self.target_umo.lower():
+            logger.warning(f"[猫尾电波] 检测到初始 target_umo 为群聊 ({self.target_umo})，已自动清空重置。")
+            self.target_umo = ""
 
         # 空闲与冷却随机区间
         self.idle_min_minutes: int = int(self.config.get("idle_min_minutes", 10))
@@ -62,6 +67,21 @@ class TailWavePlugin(Star):
             )
         )
 
+        # 预编译物理安检门正则（通杀思维链、feedback等预设XML标签与英文自审草稿）
+        self._re_xml_block = re.compile(
+            r"<(thought|think|thinking|feedback|analysis|reasoning|inner_thought|reflection|scratchpad|meta|rule|system)\b[^>]*>[\s\S]*?</\1>",
+            re.IGNORECASE,
+        )
+        self._re_xml_orphan = re.compile(
+            r"</?(?:thought|think|thinking|feedback|analysis|reasoning|inner_thought|reflection|scratchpad|meta|rule|system)\b[^>]*>",
+            re.IGNORECASE,
+        )
+        self._re_dash_list = re.compile(r"^(?:\s*[-*]\s*[A-Za-z].*?\n)+", re.MULTILINE)
+        self._re_persona_rule = re.compile(
+            r"^(?:Persona constraints|System rule|Note|Draft|Self-check|Feedback):.*?(?:\n|$)",
+            re.IGNORECASE | re.MULTILINE,
+        )
+
         # 状态变量
         self.last_interaction_time: float = time.time()
         self.last_proactive_time: float = 0.0
@@ -77,7 +97,7 @@ class TailWavePlugin(Star):
         self._ensure_loop_started()
 
         logger.info(
-            f"[猫尾电波 Tail-Wave v1.6.0] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}"
+            f"[猫尾电波 Tail-Wave v1.6.1] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}"
         )
 
     def _ensure_loop_started(self):
@@ -97,6 +117,57 @@ class TailWavePlugin(Star):
         low = min(self.interval_min_minutes, self.interval_max_minutes) * 60
         high = max(self.interval_min_minutes, self.interval_max_minutes) * 60
         return random.randint(max(10, low), max(10, high))
+
+    def _clean_llm_output(self, text: str) -> str:
+        """统一物理安检门：剥离各类预设思维链、feedback标签及英文规则草稿"""
+        if not text:
+            return ""
+        cleaned = self._re_xml_block.sub("", text)
+        cleaned = self._re_xml_orphan.sub("", cleaned)
+        cleaned = self._re_dash_list.sub("", cleaned)
+        cleaned = self._re_persona_rule.sub("", cleaned)
+        return cleaned.strip()
+
+    def _split_sentences_safely(self, text: str) -> List[str]:
+        """按句末标点安全切分，绝不在括号（含嵌套括号）内部断开"""
+        segments: List[str] = []
+        buf: List[str] = []
+        depth = 0
+        open_parens = set("（(【[「『")
+        close_parens = set("）)】]」』")
+        end_puncts = set("！!？?。~～")
+
+        for i, ch in enumerate(text):
+            buf.append(ch)
+            if ch in open_parens:
+                depth += 1
+            elif ch in close_parens:
+                depth = max(0, depth - 1)
+            elif ch in end_puncts and depth == 0:
+                if i + 1 < len(text) and text[i + 1] in (end_puncts | close_parens | set('”"\'')):
+                    continue
+                seg = "".join(buf).strip()
+                if seg:
+                    segments.append(seg)
+                buf = []
+
+        rem = "".join(buf).strip()
+        if rem:
+            segments.append(rem)
+        return segments if segments else [text]
+
+    def _is_private_chat(self, event: AstrMessageEvent) -> bool:
+        """严格校验当前事件是否为私聊"""
+        umo = str(event.unified_msg_origin or "")
+        if "GroupMessage" in umo or ":group:" in umo.lower():
+            return False
+        if hasattr(event, "is_private_chat") and callable(event.is_private_chat):
+            try:
+                if not event.is_private_chat():
+                    return False
+            except Exception:
+                pass
+        return True
 
     def _get_current_mood_prompt(self) -> str:
         """核心匹配逻辑：按序扫描已填写的阶段槽位，留空或未命中的自动忽略"""
@@ -141,12 +212,12 @@ class TailWavePlugin(Star):
         return ""
 
     def _is_target_session(self, event: AstrMessageEvent) -> bool:
+        # 严格过滤群聊，仅服务私聊场景
+        if not self._is_private_chat(event):
+            return False
+
         umo = str(event.unified_msg_origin or "")
         sender_id = str(event.get_sender_id() or "")
-
-        # 过滤群聊，仅服务私聊场景
-        if "GroupMessage" in umo:
-            return False
 
         if self.target_user_id and (
             sender_id == self.target_user_id or self.target_user_id in umo
@@ -200,7 +271,7 @@ class TailWavePlugin(Star):
             )
 
         msg = (
-            f"🐾 【猫尾电波 Tail-Wave v1.6.0】\n"
+            f"🐾 【猫尾电波 Tail-Wave v1.6.1】\n"
             f"• 绑定会话：{self.target_umo or '未绑定(私聊一次即可自动捕获)'}\n"
             f"• 当前心境状态：{mood_preview}\n"
             f"• 空闲随机区间：{self.idle_min_minutes} ~ {self.idle_max_minutes} 分钟\n"
@@ -214,6 +285,12 @@ class TailWavePlugin(Star):
     @filter.command("proactive_now")
     async def cmd_trigger_now(self, event: AstrMessageEvent):
         self._ensure_loop_started()
+
+        # 物理拦截群聊触发，严禁群聊 UMO 污染绑定会话
+        if not self._is_private_chat(event):
+            yield event.plain_result("⚠️ 猫尾电波仅支持私聊场景哦！请前往私聊窗口发送 /proactive_now 进行测试~")
+            return
+
         if event.unified_msg_origin:
             self.target_umo = event.unified_msg_origin
         yield event.plain_result("⚡ 收到指令！将在 3 秒后发起主动连环气泡测试...")
@@ -261,21 +338,10 @@ class TailWavePlugin(Star):
         if not result or not hasattr(result, "chain"):
             return
 
-        # 物理规则安检门：过滤草稿和规则提示词
-        pattern_dash_list = re.compile(r"^(?:\s*-\s*[A-Za-z].*?\n)+", re.MULTILINE)
-        pattern_persona = re.compile(
-            r"^(?:Persona constraints|System rule|Note):.*?\n",
-            re.IGNORECASE | re.MULTILINE,
-        )
-        pattern_thought = re.compile(r"<thought>.*?</thought>", re.DOTALL)
-
+        # 物理规则安检门：过滤 <thought>、<feedback>、草稿和规则提示词
         for comp in result.chain:
             if hasattr(comp, "text") and isinstance(comp.text, str):
-                cleaned = comp.text
-                cleaned = pattern_thought.sub("", cleaned)
-                cleaned = pattern_dash_list.sub("", cleaned)
-                cleaned = pattern_persona.sub("", cleaned)
-                comp.text = cleaned.strip()
+                comp.text = self._clean_llm_output(comp.text)
 
     def _is_in_dnd(self) -> bool:
         if not self.dnd_period or "-" not in self.dnd_period:
@@ -330,6 +396,12 @@ class TailWavePlugin(Star):
 
     async def _execute_proactive_burst(self, force: bool = False):
         if self.is_sending_burst or not self.target_umo:
+            return
+
+        # 终极保险：若 target_umo 意外包含群聊标识，立即终止并清空
+        if "GroupMessage" in self.target_umo or ":group:" in self.target_umo.lower():
+            logger.warning(f"[猫尾电波] 拦截到向群聊 ({self.target_umo}) 的主动发送请求，已重置绑定！")
+            self.target_umo = ""
             return
 
         self.is_sending_burst = True
@@ -394,15 +466,10 @@ class TailWavePlugin(Star):
                 system_prompt=system_prompt,
             )
 
-            raw_text = (llm_resp.completion_text or "").strip()
+            raw_text = self._clean_llm_output(llm_resp.completion_text or "")
             if not raw_text:
                 logger.warning("[猫尾电波] LLM 返回内容为空，取消发送。")
                 return
-
-            pattern_thought = re.compile(r"<thought>.*?</thought>", re.DOTALL)
-            pattern_dash = re.compile(r"^(?:\s*-\s*[A-Za-z].*?\n)+", re.MULTILINE)
-            raw_text = pattern_thought.sub("", raw_text)
-            raw_text = pattern_dash.sub("", raw_text).strip()
 
             if self.enable_burst:
                 if "|||" in raw_text:
@@ -410,10 +477,7 @@ class TailWavePlugin(Star):
                 elif "\n" in raw_text:
                     segments = [s.strip() for s in raw_text.split("\n") if s.strip()]
                 else:
-                    split_parts = re.split(r"(?<=[！!？?。~])\s*", raw_text)
-                    segments = [p.strip() for p in split_parts if p.strip()]
-                    if not segments:
-                        segments = [raw_text]
+                    segments = self._split_sentences_safely(raw_text)
                 segments = segments[: max(1, self.max_burst_count)]
             else:
                 segments = [raw_text.replace("|||", " ").strip()]
