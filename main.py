@@ -17,7 +17,7 @@ DEFAULT_USER_PROMPT = ""
     "astrbot_plugin_tail_wave",
     "白昼夢",
     "支持拟人连环气泡、打断机制与昼夜心境轮盘的主动私聊插件",
-    "2.0.1",
+    "2.0.2",
 )
 class TailWavePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -87,7 +87,7 @@ class TailWavePlugin(Star):
         self._ensure_loop_started()
 
         logger.info(
-            f"[猫尾电波 Tail-Wave v2.0.0] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}, UserID: {self.target_user_id or '未绑定'}"
+            f"[猫尾电波 Tail-Wave v2.0.2] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}, UserID: {self.target_user_id or '未绑定'}"
         )
 
     def _migrate_proactive_prompt(self, raw_prompt: str) -> str:
@@ -125,6 +125,7 @@ class TailWavePlugin(Star):
         high = max(self.interval_min_minutes, self.interval_max_minutes) * 60
         return random.randint(max(10, low), max(10, high))
 
+    # 【深度安检门】：严防各类标签与纯英文无标签 Thinking Process 泄漏
     def _clean_llm_output(self, text: str) -> str:
         if not text:
             return ""
@@ -136,19 +137,34 @@ class TailWavePlugin(Star):
         if not cleaned:
             return ""
         lower_text = cleaned.lower()
-        has_thinking_keyword = any(kw in lower_text for kw in ["思考过程", "reasoning process", "inner thought", "分析任务目标", "构思内容"])
+        
+        has_thinking_keyword = any(kw in lower_text for kw in [
+            "思考过程", "reasoning process", "inner thought", 
+            "分析任务目标", "构思内容", "thinking process", 
+            "analyze the request", "drafting the response"
+        ])
+        
         has_structure_outline = bool(re.search(r"(\n\s*1\.\s*\*\*|\n\s*-\s*\*\*[分析构思任务]*|^\s*1\.\s+)", cleaned))
 
-        if has_thinking_keyword and has_structure_outline:
-            split_keywords = ["最终输出生成", "最终输出：", "最终输出", "输出：", "输出:", "回复：", "回复:", "生成内容：", "生成：", "**最终输出**"]
+        if has_thinking_keyword or has_structure_outline:
+            split_keywords = [
+                "最终输出生成", "最终输出：", "最终输出", "输出：", "输出:", "回复：", "回复:", 
+                "生成内容：", "生成：", "**最终输出**", 
+                "**final polish:**", "final response:", "response:"
+            ]
             found_split = False
             for kw in split_keywords:
-                if kw in cleaned:
-                    parts = cleaned.split(kw)
-                    if len(parts) > 1 and len(parts[-1].strip()) > 0:
-                        cleaned = parts[-1].strip()
-                        found_split = True
-                        break
+                kw_lower = kw.lower()
+                if kw_lower in lower_text:
+                    idx = lower_text.rfind(kw_lower)
+                    if idx != -1:
+                        real_kw_len = len(kw)
+                        parts = cleaned[idx + real_kw_len:]
+                        if len(parts.strip()) > 0:
+                            cleaned = parts.strip()
+                            found_split = True
+                            break
+                            
             if not found_split:
                 lines = cleaned.split("\n")
                 valid_lines = []
@@ -156,9 +172,9 @@ class TailWavePlugin(Star):
                 for line in lines:
                     line_str = line.strip()
                     if is_thinking_zone:
-                        if re.match(r"^(\d+\.|\-|\*)\s*(\*\*)?(分析|构思|字数|约束|角色|任务|目标)", line_str):
+                        if re.match(r"^(\d+\.|\-|\*)\s*(\*\*)?(分析|构思|字数|约束|角色|任务|目标|analyze|draft|refine|polish)", line_str, re.IGNORECASE):
                             continue
-                        elif any(kw in line_str.lower() for kw in ["思考过程", "reasoning process"]):
+                        elif any(kw in line_str.lower() for kw in ["思考过程", "reasoning process", "thinking process"]):
                             continue
                         else:
                             is_thinking_zone = False
@@ -171,6 +187,7 @@ class TailWavePlugin(Star):
                     cleaned = "\n".join(valid_lines).strip()
 
         cleaned = re.sub(r"^[#*_\s]*最终输出[#*_\s]*[：:]?\s*", "", cleaned)
+        cleaned = re.sub(r"^[#*_\s]*final polish[#*_\s]*[：:]?\s*", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
 
     def _is_private_chat(self, event: AstrMessageEvent) -> bool:
@@ -261,7 +278,7 @@ class TailWavePlugin(Star):
         min_req = max(2, int(max_x * 0.6)) if max_x >= 3 else min(max_x, 2)
 
         msg = (
-            f"🐾 【猫尾电波 Tail-Wave v2.0.0】\n"
+            f"🐾 【猫尾电波 Tail-Wave v2.0.2】\n"
             f"• 绑定会话：{self.target_umo or '未绑定(私聊一次即可自动捕获)'}\n"
             f"• 绑定用户：{self.target_user_id or '未绑定'}\n"
             f"• 当前心境状态：{mood_preview}\n"
