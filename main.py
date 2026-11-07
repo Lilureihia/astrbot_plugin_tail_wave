@@ -12,12 +12,11 @@ from astrbot.api.star import Context, Star, register
 
 DEFAULT_USER_PROMPT = ""
 
-
 @register(
     "astrbot_plugin_tail_wave",
     "白昼夢",
     "支持拟人连环气泡、打断机制与昼夜心境轮盘的主动私聊插件",
-    "2.0.3",
+    "2.0.4",
 )
 class TailWavePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -80,7 +79,7 @@ class TailWavePlugin(Star):
         self._ensure_loop_started()
 
         logger.info(
-            f"[猫尾电波 Tail-Wave v2.0.3] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}, UserID: {self.target_user_id or '未绑定'}"
+            f"[猫尾电波 Tail-Wave v2.0.4] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}, UserID: {self.target_user_id or '未绑定'}"
         )
 
     def _migrate_proactive_prompt(self, raw_prompt: str) -> str:
@@ -122,12 +121,12 @@ class TailWavePlugin(Star):
 
     def _clean_llm_output(self, text: str) -> str:
         """
-        深度安检门 2.0 (终极加固版)：
+        深度安检门 2.0.4 (破甲感知版)：
         1. 剥离 XML 思考标签与元标记
-        2. 剥离行末字符统计自检括号（范围锁定在 1~30 的短文本自检，精准覆盖 '(20字以内)'、'(16 chars)' 等）
-        3. 裁切分步思考结构化草稿（构思内容/检查约束/系统提示等）
-        4. 剥离英文元指令行（Keep it within... / Persona constraints...）
-        5. 剥离 Markdown 列表符前缀（'- '、'* '），免死保护成对动作描写（*动作*）及紧贴汉字的单边动作
+        2. 剥离行末字符统计自检括号
+        3. 裁切无排版的“裸奔”思维链（如：思考过程: ...）
+        4. 剥离英文元指令行
+        5. 从混杂草稿中精准提取末尾的最终方案引语
         """
         if not text:
             return ""
@@ -139,7 +138,7 @@ class TailWavePlugin(Star):
         if not cleaned:
             return ""
 
-        # 2. 剥离行末字符自检括号（精准匹配管道符 |，杜绝转义字符）
+        # 2. 剥离行末字符自检括号
         cleaned = re.sub(
             r"[\(（]\s*(?:约|共|不超过)?\s*(?:[1-2]?\d|30)\s*(?:chars?|words?|个?字)\s*(?:以内|以下)?\s*[\)）]\s*$",
             "",
@@ -147,19 +146,19 @@ class TailWavePlugin(Star):
             flags=re.IGNORECASE | re.MULTILINE,
         )
 
-        # 3. 结构化“分步思考草稿”切除（仅当具备强 Markdown 粗体冒号或元数据列表特征时才触发）
+        # 3. 结构化“分步思考草稿”切除（新增支持无粗体、裸奔特征捕获）
         has_cot_structure = bool(
             re.search(
-                r"(\*\*(?:构思内容|检查约束|思考过程|任务目标)\*\*|^\s*[-*•]\s*(?:当前时间|系统提示|字数限制|禁止输出|角色设定)[：:])",
+                r"(\*\*(?:构思内容|检查约束|思考过程|任务目标)\*\*|^\s*[-*•]?\s*(?:当前时间|系统提示|字数限制|禁止输出|角色设定|思考过程|分析过程|Thinking Process)[：:])",
                 cleaned,
-                re.MULTILINE,
+                re.MULTILINE | re.IGNORECASE,
             )
         )
 
         if has_cot_structure:
             split_patterns = [
                 r"\*\*(?:最终输出|输出|回复|生成|final\s*response|final\s*polish)\*\*[:：]?",
-                r"(?:最终输出|生成内容|回复内容|最终气泡)[:：]",
+                r"(?:最终输出|生成内容|回复内容|最终气泡|最终选择|精选方案并优化)[:：]",
                 r"\*\*(?:检查约束|约束校验|self-check)\*\*.*?[。！？\.\!\?]\s*",
             ]
             found = False
@@ -170,12 +169,13 @@ class TailWavePlugin(Star):
                     found = True
                     break
 
+            # 如果没找到标准锚点，倒序搜寻第一个脱离思维链行首特征的干净句子
             if not found:
                 lines = [l.strip() for l in cleaned.split("\n") if l.strip()]
                 candidate = ""
                 for line in reversed(lines):
                     if re.match(
-                        r"^[-*•\d\.]+\s*(\*\*)?(当前时间|系统提示|字数限制|禁止输出|角色设定|构思内容|检查约束|Keep\b)",
+                        r"^[-*•\d\.]+\s*(\*\*)?(当前时间|系统提示|字数限制|禁止输出|角色设定|构思内容|检查约束|Keep\b|思考过程|分析过程)",
                         line,
                         re.IGNORECASE,
                     ):
@@ -198,16 +198,17 @@ class TailWavePlugin(Star):
             flags=re.IGNORECASE | re.MULTILINE,
         )
 
-        # 5. 精准剥除“列表草稿前缀”（保留成对动作描写 *动作* 与紧贴汉字的单边动作）
+        # 4.5. 提取混在草稿末尾的引语方案 (如：或者：“快醒醒！”(超字数))
+        cleaned = re.sub(r"^或者：?[\"“]?(.*?)[\"”]?\s*(?:[\(（].*?超了一点.*?[\)）])?$", r"\1", cleaned, flags=re.MULTILINE)
+
+        # 5. 精准剥除“列表草稿前缀”
         lines = cleaned.split("\n")
         safe_lines = []
         for line in lines:
             line_str = line.strip()
-            # 若符合成对拟人动作描写（形如 *动作*），严禁破坏星号
             if re.match(r"^\*[^\*\s]+.*?\*", line_str):
                 safe_lines.append(line_str)
             else:
-                # 仅剥离行首作为 Markdown 列表的 "- "、"* "、"• " 及包裹引号
                 line_str = re.sub(r"^[-*•]\s+[\"“]?", "", line_str)
                 line_str = re.sub(r"[\"”]$", "", line_str)
                 if line_str:
@@ -215,7 +216,7 @@ class TailWavePlugin(Star):
         cleaned = "\n".join(safe_lines).strip()
 
         # 6. 收尾清理
-        cleaned = re.sub(r"^[#*_\s]*最终输出[#*_\s]*[：:]?\s*", "", cleaned)
+        cleaned = re.sub(r"^[#*_\s]*(?:最终输出|精选方案)[#*_\s]*[：:]?\s*", "", cleaned)
         cleaned = re.sub(r"^[#*_\s]*final polish[#*_\s]*[：:]?\s*", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()
 
@@ -307,7 +308,7 @@ class TailWavePlugin(Star):
         min_req = max(2, int(max_x * 0.6)) if max_x >= 3 else min(max_x, 2)
 
         msg = (
-            f"🐾 【猫尾电波 Tail-Wave v2.0.3】\n"
+            f"🐾 【猫尾电波 Tail-Wave v2.0.4】\n"
             f"• 绑定会话：{self.target_umo or '未绑定(私聊一次即可自动捕获)'}\n"
             f"• 绑定用户：{self.target_user_id or '未绑定'}\n"
             f"• 当前心境状态：{mood_preview}\n"
@@ -586,7 +587,7 @@ class TailWavePlugin(Star):
                 history_contexts.append({"role": "assistant", "content": seg})
 
                 # ========================================================
-                # 【第 1 项落地】：发一句存一句（毫秒级增量合并防幻读）
+                # 【底层修复】：发一句存一句（增量合并并强制触发落盘防失忆）
                 # ========================================================
                 if conv_mgr:
                     try:
@@ -627,9 +628,15 @@ class TailWavePlugin(Star):
                                 await conv_mgr.update_conversation(umo, curr_cid, history=history_str)
                             except TypeError:
                                 await conv_mgr.update_conversation(umo, curr_cid, history=history_list)
+                            
+                            # 【核心钩子】：强制呼叫底层的 save_conversation 持久化落盘，杜绝重启失忆！
+                            if hasattr(conv_mgr, "save_conversation") and callable(conv_mgr.save_conversation):
+                                await conv_mgr.save_conversation(umo, curr_cid)
+                                logger.info("[猫尾电波] 💾 增量记忆已强制触发底层持久化落盘，杜绝重启失忆。")
+                            
                             logger.info(f"[猫尾电波] [记忆落库] 成功刻录主动气泡到历史记忆: {seg}")
                     except Exception as e:
-                        logger.warning(f"[猫尾电波] [记忆落库] 实时增量合并失败: {e}")
+                        logger.warning(f"[猫尾电波] [记忆落库] 实时增量合并或强制落盘失败: {e}")
                 # ========================================================
 
                 if turn < max_allowed_turns - 1:
@@ -646,9 +653,6 @@ class TailWavePlugin(Star):
                             break
                         await asyncio.sleep(0.1)
                         
-                    # ========================================================
-                    # 【第 7 项落地】：delay 循环外部强校验，物理斩断连击穿透！
-                    # ========================================================
                     if interrupted_during_delay or self.user_interrupted_burst:
                         logger.info("[猫尾电波] 🛑 彻底物理腰斩当前连击大循环，绝不把打断信息带入下一次生成！")
                         break
