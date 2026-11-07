@@ -529,14 +529,18 @@ class TailWavePlugin(Star):
                 elif is_forced_continue:
                     recent_spoken = " ".join(sent_segments)
                     turn_instruction = (
-                        f"[已发气泡]：“{recent_spoken}”。\n"
-                        f"顺着你刚才的话头，以符合你人设的方式再自然补充一小句短消息（20字以内）。"
+                        f"【系统巡检推进（搭档目前依然安静，并未接话）】\n"
+                        f"这是你（你自己）刚才连续主动发出的气泡：“{recent_spoken}”。\n"
+                        f"顺着你刚才的话头，以符合你人设的方式再自然补充一小句短消息（20字以内）。\n"
+                        f"（严正注意：搭档没有说话，严禁将上述内容误判为搭档的发言或复读！）"
                     )
                 else:
                     recent_spoken = " ".join(sent_segments)
                     turn_instruction = (
-                        f"[已发气泡]：“{recent_spoken}”。\n"
-                        f"已满足保底。觉得想说的话已经说完了就打住，严格只回复暗号：{stop_token}；如果还想补充就以你的性格直接输出短句。"
+                        f"【系统巡检推进（搭档目前依然安静，并未接话）】\n"
+                        f"这是你（你自己）刚才连续主动发出的气泡：“{recent_spoken}”。\n"
+                        f"已满足保底。觉得想说的话已经说完了就打住，严格只回复暗号：{stop_token}；如果还想补充就以你的性格直接输出短句。\n"
+                        f"（严正注意：搭档没有说话，严禁将上述内容误判为搭档的发言或复读！）"
                     )
 
                 logger.info(f"[猫尾电波] 正在生成第 {turn + 1}/{max_allowed_turns} 轮动态气泡...")
