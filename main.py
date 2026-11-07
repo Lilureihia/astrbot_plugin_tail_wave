@@ -16,7 +16,7 @@ DEFAULT_USER_PROMPT = ""
     "astrbot_plugin_tail_wave",
     "白昼夢",
     "支持拟人连环气泡、打断机制与昼夜心境轮盘的主动私聊插件",
-    "2.0.4",
+    "2.0.8",
 )
 class TailWavePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -52,7 +52,6 @@ class TailWavePlugin(Star):
         self.phase_4_time: str = str(self.config.get("phase_4_time", "18:00-24:00")).strip()
         self.phase_4_prompt: str = str(self.config.get("phase_4_prompt", "")).strip()
 
-        # 基础 XML/元标签剥离正则
         self._re_xml_block = re.compile(
             r"<(thought|think|thinking|feedback|analysis|reasoning|inner_thought|reflection|scratchpad|meta|rule|system)\b[^>]*>[\s\S]*?</\1>",
             re.IGNORECASE,
@@ -64,6 +63,10 @@ class TailWavePlugin(Star):
 
         raw_prompt = str(self.config.get("proactive_prompt", DEFAULT_USER_PROMPT))
         self.proactive_prompt: str = self._migrate_proactive_prompt(raw_prompt)
+
+        self.plugin_cache = self.config.get("_tail_wave_cache", {})
+        if not isinstance(self.plugin_cache, dict):
+            self.plugin_cache = {}
 
         self.last_interaction_time: float = time.time()
         self.last_proactive_time: float = 0.0
@@ -79,7 +82,7 @@ class TailWavePlugin(Star):
         self._ensure_loop_started()
 
         logger.info(
-            f"[猫尾电波 Tail-Wave v2.0.4] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}, UserID: {self.target_user_id or '未绑定'}"
+            f"[猫尾电波 Tail-Wave v2.0.8] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}, UserID: {self.target_user_id or '未绑定'}"
         )
 
     def _migrate_proactive_prompt(self, raw_prompt: str) -> str:
@@ -121,103 +124,40 @@ class TailWavePlugin(Star):
 
     def _clean_llm_output(self, text: str) -> str:
         """
-        深度安检门 2.0.4 (破甲感知版)：
-        1. 剥离 XML 思考标签与元标记
-        2. 剥离行末字符统计自检括号
-        3. 裁切无排版的“裸奔”思维链（如：思考过程: ...）
-        4. 剥离英文元指令行
-        5. 从混杂草稿中精准提取末尾的最终方案引语
+        深度安检门 2.0.8 (核武级反引号与英文前缀绞杀版)：
+        1. 剥离 XML 思考标签
+        2. 暴力剔除包含 "Let's use"、"characters"、字数统计的整行
+        3. 剥离反引号包裹，完美只留正文
         """
         if not text:
             return ""
 
-        # 1. 基础 XML 思考标签剥离
         cleaned = self._re_xml_block.sub("", text)
         cleaned = self._re_xml_orphan.sub("", cleaned)
         cleaned = cleaned.strip()
         if not cleaned:
             return ""
 
-        # 2. 剥离行末字符自检括号
-        cleaned = re.sub(
-            r"[\(（]\s*(?:约|共|不超过)?\s*(?:[1-2]?\d|30)\s*(?:chars?|words?|个?字)\s*(?:以内|以下)?\s*[\)）]\s*$",
-            "",
-            cleaned,
-            flags=re.IGNORECASE | re.MULTILINE,
-        )
-
-        # 3. 结构化“分步思考草稿”切除（新增支持无粗体、裸奔特征捕获）
-        has_cot_structure = bool(
-            re.search(
-                r"(\*\*(?:构思内容|检查约束|思考过程|任务目标)\*\*|^\s*[-*•]?\s*(?:当前时间|系统提示|字数限制|禁止输出|角色设定|思考过程|分析过程|Thinking Process)[：:])",
-                cleaned,
-                re.MULTILINE | re.IGNORECASE,
-            )
-        )
-
-        if has_cot_structure:
-            split_patterns = [
-                r"\*\*(?:最终输出|输出|回复|生成|final\s*response|final\s*polish)\*\*[:：]?",
-                r"(?:最终输出|生成内容|回复内容|最终气泡|最终选择|精选方案并优化)[:：]",
-                r"\*\*(?:检查约束|约束校验|self-check)\*\*.*?[。！？\.\!\?]\s*",
-            ]
-            found = False
-            for pat in split_patterns:
-                parts = re.split(pat, cleaned, flags=re.IGNORECASE)
-                if len(parts) > 1 and parts[-1].strip():
-                    cleaned = parts[-1].strip()
-                    found = True
-                    break
-
-            # 如果没找到标准锚点，倒序搜寻第一个脱离思维链行首特征的干净句子
-            if not found:
-                lines = [l.strip() for l in cleaned.split("\n") if l.strip()]
-                candidate = ""
-                for line in reversed(lines):
-                    if re.match(
-                        r"^[-*•\d\.]+\s*(\*\*)?(当前时间|系统提示|字数限制|禁止输出|角色设定|构思内容|检查约束|Keep\b|思考过程|分析过程)",
-                        line,
-                        re.IGNORECASE,
-                    ):
-                        sub_text = re.sub(r"^.*?贴合人设[。！？\.\!\?]?\s*", "", line)
-                        sub_text = re.sub(r"^.*?[\:：]\s*", "", sub_text)
-                        if sub_text and not any(k in sub_text for k in ["字数", "约束", "设定"]):
-                            candidate = sub_text
-                            break
-                        continue
-                    candidate = line
-                    break
-                if candidate:
-                    cleaned = candidate
-
-        # 4. 剥离英文元指令行
-        cleaned = re.sub(
-            r"^\s*[-*•]?\s*(?:Keep\b.*?within|Persona constraints\b|System rule\b).*?(?:\n|$)",
-            "",
-            cleaned,
-            flags=re.IGNORECASE | re.MULTILINE,
-        )
-
-        # 4.5. 提取混在草稿末尾的引语方案 (如：或者：“快醒醒！”(超字数))
-        cleaned = re.sub(r"^或者：?[\"“]?(.*?)[\"”]?\s*(?:[\(（].*?超了一点.*?[\)）])?$", r"\1", cleaned, flags=re.MULTILINE)
-
-        # 5. 精准剥除“列表草稿前缀”
+        # 核武级安检：按行扫描，彻底绞杀任何带 Let's use 或字数统计的行
         lines = cleaned.split("\n")
-        safe_lines = []
+        filtered_lines = []
         for line in lines:
             line_str = line.strip()
-            if re.match(r"^\*[^\*\s]+.*?\*", line_str):
-                safe_lines.append(line_str)
-            else:
-                line_str = re.sub(r"^[-*•]\s+[\"“]?", "", line_str)
-                line_str = re.sub(r"[\"”]$", "", line_str)
-                if line_str:
-                    safe_lines.append(line_str)
-        cleaned = "\n".join(safe_lines).strip()
+            if re.search(r"(?:let'?s\s*use|characters?|words?|个?字)", line_str, re.IGNORECASE):
+                # 尝试剥离前缀和尾部统计，如果只剩空内容则直接丢弃
+                line_str = re.sub(r"^.*?(?:let'?s\s*use[:：]\s*[`'\"“]?)", "", line_str, flags=re.IGNORECASE)
+                line_str = re.sub(r"\s*[`'\"”]?\s*[\(（]?\d*\s*(?:chars?|words?|characters?|个?字)?[\)）]?\s*$", "", line_str, flags=re.IGNORECASE)
+                if not line_str.strip() or "let's use" in line_str.lower():
+                    continue
+            if re.match(r"^(?:Perfect\.?|OK\.?|Pass\.?|->|-&gt;|\d+|\(.*\))+[\s\.\!]*$", line_str, re.IGNORECASE):
+                continue
+            filtered_lines.append(line_str)
+        cleaned = "\n".join(filtered_lines).strip()
+        if not cleaned:
+            return ""
 
-        # 6. 收尾清理
-        cleaned = re.sub(r"^[#*_\s]*(?:最终输出|精选方案)[#*_\s]*[：:]?\s*", "", cleaned)
-        cleaned = re.sub(r"^[#*_\s]*final polish[#*_\s]*[：:]?\s*", "", cleaned, flags=re.IGNORECASE)
+        # 去除残留的反引号包裹与引号
+        cleaned = re.sub(r"^[`'\"“]+|[`'\"”]+$", "", cleaned).strip()
         return cleaned.strip()
 
     def _is_private_chat(self, event: AstrMessageEvent) -> bool:
@@ -308,7 +248,7 @@ class TailWavePlugin(Star):
         min_req = max(2, int(max_x * 0.6)) if max_x >= 3 else min(max_x, 2)
 
         msg = (
-            f"🐾 【猫尾电波 Tail-Wave v2.0.4】\n"
+            f"🐾 【猫尾电波 Tail-Wave v2.0.8】\n"
             f"• 绑定会话：{self.target_umo or '未绑定(私聊一次即可自动捕获)'}\n"
             f"• 绑定用户：{self.target_user_id or '未绑定'}\n"
             f"• 当前心境状态：{mood_preview}\n"
@@ -440,14 +380,9 @@ class TailWavePlugin(Star):
         if self.is_sending_burst or not self.target_umo:
             return
 
-        if "GroupMessage" in self.target_umo or ":group:" in self.target_umo.lower():
-            logger.warning(f"[猫尾电波] 拦截到向群聊 ({self.target_umo}) 的主动发送请求，已重置绑定！")
-            self.target_umo = ""
-            return
-
+        umo = self.target_umo
         self.is_sending_burst = True
         self.user_interrupted_burst = False
-        umo = self.target_umo
 
         sent_segments: List[str] = []
 
@@ -467,6 +402,18 @@ class TailWavePlugin(Star):
         curr_cid = None
         conv = None
 
+        plugin_cache = self.config.get("_tail_wave_cache", {})
+        last_spoken_content = ""
+        if isinstance(plugin_cache, dict):
+            umo_mem = plugin_cache.get(umo, [])
+            if isinstance(umo_mem, list):
+                for item in umo_mem[-20:]:
+                    if isinstance(item, dict) and "role" in item and "content" in item:
+                        if item not in history_contexts:
+                            history_contexts.append(item)
+                        if item.get("role") == "assistant":
+                            last_spoken_content = item.get("content", "")
+
         if conv_mgr:
             try:
                 curr_cid = await conv_mgr.get_curr_conversation_id(umo)
@@ -478,7 +425,10 @@ class TailWavePlugin(Star):
                     if isinstance(raw_history, list):
                         for item in raw_history[-20:]:
                             if isinstance(item, dict) and "role" in item and "content" in item:
-                                history_contexts.append(item)
+                                if item not in history_contexts:
+                                    history_contexts.append(item)
+                                if item.get("role") == "assistant":
+                                    last_spoken_content = item.get("content", "")
             except Exception as e:
                 logger.warning(f"[猫尾电波] 读取会话历史失败: {e}")
 
@@ -503,7 +453,6 @@ class TailWavePlugin(Star):
         try:
             for turn in range(max_allowed_turns):
                 if self.user_interrupted_burst:
-                    logger.info("[猫尾电波] 🛑 连击循环中实时捕获到中断信号，立刻强制中止后续气泡生成！")
                     break
 
                 idle_mins = max(1, int((time.time() - self.last_interaction_time) // 60))
@@ -517,14 +466,17 @@ class TailWavePlugin(Star):
                 user_guidance = self.proactive_prompt.strip()
                 user_block = f"\n【补充指引】：{user_guidance}" if user_guidance else ""
 
+                # 显式记忆锚点：把刚才真实说过的一句话强行压入提示词中，绝对不准失忆！
+                memory_anchor = f"\n【记忆绝对锚点】：你刚刚主动对搭档说过：“{last_spoken_content}”。你必须无缝顺承此话题，绝不准重开新梗（如盖被子等）！" if (turn == 0 and last_spoken_content) else ""
+
                 is_forced_continue = len(sent_segments) < min_required_turns
 
                 if turn == 0:
                     turn_instruction = (
                         f"[当前场景：时间走到了 {now_str}，搭档已安静了约 {idle_mins} 分钟。]\n"
-                        f"{mood_block}\n{base_soul_guard}{user_block}\n"
+                        f"{mood_block}{memory_anchor}\n{base_soul_guard}{user_block}\n"
                         f"【你的心理活动】：你现在想自然地找搭档搭句话。请结合你们上方的上下文与当下的情境，"
-                        f"自主决定是顺承未尽的话题还是开启新话题，以符合你人设的方式随性发一句短消息（20字以内）。"
+                        f"以符合你人设的方式随性发一句短消息（20字以内）。"
                     )
                 elif is_forced_continue:
                     recent_spoken = " ".join(sent_segments)
@@ -543,12 +495,6 @@ class TailWavePlugin(Star):
                         f"（严正注意：搭档没有说话，严禁将上述内容误判为搭档的发言或复读！）"
                     )
 
-                logger.info(f"[猫尾电波] 正在生成第 {turn + 1}/{max_allowed_turns} 轮动态气泡...")
-
-                if self.user_interrupted_burst:
-                    logger.info("[猫尾电波] 🛑 大模型调用前夕检测到对方输入，瞬间熔断拦截！")
-                    break
-
                 llm_resp = await provider.text_chat(
                     prompt=turn_instruction,
                     session_id=umo,
@@ -557,42 +503,34 @@ class TailWavePlugin(Star):
                 )
 
                 if self.user_interrupted_burst:
-                    logger.info("[猫尾电波] 🛑 大模型返回瞬间检测到对方输入，丢弃本次生成内容！")
                     break
 
                 raw_text = self._clean_llm_output(llm_resp.completion_text or "")
-
-                if not is_forced_continue and (not raw_text or stop_token in raw_text or len(raw_text.strip()) == 0):
-                    if stop_token in (raw_text or ""):
-                        logger.info(f"[猫尾电波] ✨ 第 {turn + 1} 轮模型自主输出暗号 ({stop_token})，判定话头已完整交接，主动结束连击。")
-                    else:
-                        logger.info(f"[猫尾电波] 🍃 第 {turn + 1} 轮模型输出为空白内容，主动结束连击。")
-                    break
-
-                seg = raw_text.strip()
-                if not seg:
+                if not raw_text:
                     continue
 
-                if not is_forced_continue and stop_token in seg:
-                    logger.info(f"[猫尾电波] ✨ 文本中捕获暗号 ({stop_token})，自然结束连击。")
-                    break
-
-                if stop_token in seg:
-                    seg = seg.replace(stop_token, "").strip()
-                    if not seg:
-                        logger.info(f"[猫尾电波] ✨ 剥离暗号后内容为空，自然结束连击。")
-                        break
-
+                seg = raw_text.strip()
                 chain = MessageChain().message(seg)
                 await self.context.send_message(umo, chain)
                 sent_segments.append(seg)
+                last_spoken_content = seg  # 实时更新
+
                 logger.info(f"[猫尾电波] 成功投递第 {len(sent_segments)} 条微型气泡: {seg}")
 
                 history_contexts.append({"role": "assistant", "content": seg})
 
                 # ========================================================
-                # 【底层修复】：发一句存一句（增量合并并强制触发落盘防失忆）
+                # 【底层全面穿透】：双通道强刷配置缓存与框架会话数据库
                 # ========================================================
+                try:
+                    if not isinstance(self.config.get("_tail_wave_cache"), dict):
+                        self.config["_tail_wave_cache"] = {}
+                    self.config["_tail_wave_cache"][umo] = history_contexts[-40:]
+                    if hasattr(self.config, "save_config") and callable(self.config.save_config):
+                        self.config.save_config()
+                except Exception:
+                    pass
+
                 if conv_mgr:
                     try:
                         curr_cid = await conv_mgr.get_curr_conversation_id(umo)
@@ -601,46 +539,39 @@ class TailWavePlugin(Star):
                         
                         live_conv = await conv_mgr.get_conversation(umo, curr_cid)
                         if live_conv:
-                            raw_h = live_conv.history
                             history_list = []
-                            if raw_h:
-                                if isinstance(raw_h, str):
-                                    try:
-                                        history_list = json.loads(raw_h)
+                            if live_conv.history:
+                                try:
+                                    if isinstance(live_conv.history, str):
+                                        history_list = json.loads(live_conv.history)
                                         if isinstance(history_list, str):
                                             history_list = json.loads(history_list)
-                                    except Exception:
-                                        history_list = []
-                                elif isinstance(raw_h, list):
-                                    history_list = list(raw_h)
+                                    elif isinstance(live_conv.history, list):
+                                        history_list = list(live_conv.history)
+                                except Exception:
+                                    history_list = []
                             if not isinstance(history_list, list):
                                 history_list = []
 
-                            new_bubbles = []
-                            if turn == 0:
-                                if not history_list or history_list[-1].get("role") != "user":
-                                    new_bubbles.append({"role": "user", "content": "……"})
-                                    
-                            new_bubbles.append({"role": "assistant", "content": seg})
-                            history_list.extend(new_bubbles)
+                            if not history_list or history_list[-1].get("role") != "user":
+                                history_list.append({"role": "user", "content": "……"})
+                            
+                            history_list.append({"role": "assistant", "content": seg})
 
-                            if len(history_list) > 40:
-                                history_list = history_list[-40:]
-                                
+                            if len(history_list) > 50:
+                                history_list = history_list[-50:]
+
                             history_str = json.dumps(history_list, ensure_ascii=False)
                             try:
                                 await conv_mgr.update_conversation(umo, curr_cid, history=history_str)
                             except TypeError:
                                 await conv_mgr.update_conversation(umo, curr_cid, history=history_list)
-                            
-                            # 【核心钩子】：强制呼叫底层的 save_conversation 持久化落盘，杜绝重启失忆！
+
                             if hasattr(conv_mgr, "save_conversation") and callable(conv_mgr.save_conversation):
                                 await conv_mgr.save_conversation(umo, curr_cid)
-                                logger.info("[猫尾电波] 💾 增量记忆已强制触发底层持久化落盘，杜绝重启失忆。")
-                            
-                            logger.info(f"[猫尾电波] [记忆落库] 成功刻录主动气泡到历史记忆: {seg}")
+                            logger.info(f"[猫尾电波] 💾 成功将主动气泡双向刻录至底层会话数据库！")
                     except Exception as e:
-                        logger.warning(f"[猫尾电波] [记忆落库] 实时增量合并或强制落盘失败: {e}")
+                        logger.warning(f"[猫尾电波] 写入底层会话历史异常: {e}")
                 # ========================================================
 
                 if turn < max_allowed_turns - 1:
@@ -648,32 +579,18 @@ class TailWavePlugin(Star):
                         min(self.burst_min_delay_sec, self.burst_max_delay_sec),
                         max(self.burst_min_delay_sec, self.burst_max_delay_sec),
                     )
-                    
-                    interrupted_during_delay = False
                     for _ in range(int(delay * 10)):
                         if self.user_interrupted_burst:
-                            logger.info("[猫尾电波] ⚡ 在气泡停顿等待间隙高频捕获打断信号，即时跳出延迟！")
-                            interrupted_during_delay = True
                             break
                         await asyncio.sleep(0.1)
-                        
-                    if interrupted_during_delay or self.user_interrupted_burst:
-                        logger.info("[猫尾电波] 🛑 彻底物理腰斩当前连击大循环，绝不把打断信息带入下一次生成！")
-                        break
 
             if sent_segments:
                 now_ts = time.time()
                 self.last_proactive_time = now_ts
                 self.last_interaction_time = now_ts
                 self.daily_sent_count += 1
-
                 self.current_idle_target_sec = self._roll_idle_seconds()
                 self.current_interval_target_sec = self._roll_interval_seconds()
-
-                logger.info(
-                    f"[猫尾电波] 🏁 本轮主动交互圆满完成！共成功投递 {len(sent_segments)} 条微型气泡。"
-                    f"下轮空闲静默靶心已重新抽取为: {self.current_idle_target_sec // 60} 分 {self.current_idle_target_sec % 60} 秒。"
-                )
 
         except Exception as e:
             logger.error(f"[猫尾电波] 执行主动交互时出错: {e}")
