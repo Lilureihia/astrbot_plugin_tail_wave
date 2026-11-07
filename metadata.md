@@ -1,6 +1,6 @@
 name: astrbot_plugin_tail_wave
 display_name: 猫尾电波 Tail-Wave
 desc: 藏在电波里的主动私聊：碎碎念，懂倾听，知冷暖
-version: v2.0.8
+version: v2.1.0
 author: 白昼夢
 repo: https://github.com/Lilureihia/astrbot_plugin_tail_wave
