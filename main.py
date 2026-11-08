@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import json
+import os
 import random
 import re
 import time
@@ -66,15 +67,14 @@ class TailWavePlugin(Star):
         raw_prompt = str(self.config.get("proactive_prompt", DEFAULT_USER_PROMPT))
         self.proactive_prompt: str = self._migrate_proactive_prompt(raw_prompt)
 
-        # 小本本：持久化保存当前会话发过的主动消息（仅在 /reset 或表面历史清空时才跟着清空，绝不在收到普通回复时误删）
-        self.plugin_cache = self.config.get("_tail_wave_cache", {})
-        if not isinstance(self.plugin_cache, dict):
-            self.plugin_cache = {}
+        # 规范化数据持久化目录：将运行时小本本缓存与 pending 状态存储在 data/plugin_data/astrbot_plugin_tail_wave
+        self.data_dir: str = os.path.join("data", "plugin_data", "astrbot_plugin_tail_wave")
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.cache_file: str = os.path.join(self.data_dir, "runtime_cache.json")
 
-        # 状态锁：记录当前会话是否处于“主动模式待收尾（等待搭档第一句回应/打断）”状态
-        self.proactive_pending = self.config.get("_tail_wave_pending", {})
-        if not isinstance(self.proactive_pending, dict):
-            self.proactive_pending = {}
+        self.plugin_cache: dict = {}
+        self.proactive_pending: dict = {}
+        self._load_cache()
 
         self.last_interaction_time: float = time.time()
         self.last_proactive_time: float = 0.0
@@ -110,14 +110,35 @@ class TailWavePlugin(Star):
                 pass
         return cleaned
 
+    def _load_cache(self):
+        """从 data/plugin_data/astrbot_plugin_tail_wave 加载运行时缓存与状态"""
+        if not os.path.exists(self.cache_file):
+            return
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                c_data = data.get("plugin_cache", {})
+                p_data = data.get("proactive_pending", {})
+                self.plugin_cache = c_data if isinstance(c_data, dict) else {}
+                self.proactive_pending = p_data if isinstance(p_data, dict) else {}
+        except Exception as e:
+            logger.warning(f"[猫尾电波] 读取运行时缓存文件异常，已初始化为空: {e}")
+            self.plugin_cache = {}
+            self.proactive_pending = {}
+
     def _save_cache(self):
-        if hasattr(self.config, "save_config") and callable(self.config.save_config):
-            try:
-                self.config["_tail_wave_cache"] = self.plugin_cache
-                self.config["_tail_wave_pending"] = self.proactive_pending
-                self.config.save_config()
-            except Exception:
-                pass
+        """将运行时缓存与状态持久化至 data/plugin_data/astrbot_plugin_tail_wave"""
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            payload = {
+                "plugin_cache": self.plugin_cache if isinstance(self.plugin_cache, dict) else {},
+                "proactive_pending": self.proactive_pending if isinstance(self.proactive_pending, dict) else {},
+            }
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[猫尾电波] 保存运行时缓存文件失败: {e}")
 
     def _get_cached_bubble_list(self, umo: str) -> List[str]:
         """获取小本本中记录的主动气泡列表"""
@@ -163,10 +184,7 @@ class TailWavePlugin(Star):
         return []
 
     async def _write_history_to_conv(self, conv_mgr, umo: str, curr_cid: str, history_list: List[dict]):
-        """安全写入 conv_mgr，自动探测底层需要 list 还是 JSON str，杜绝双重编码导致失明"""
-        if len(history_list) > 40:
-            history_list = history_list[-40:]
-
+        """安全向后追加写入 conv_mgr，保留完整既有历史，自动适配底层 list 或 JSON str"""
         history_str = json.dumps(history_list, ensure_ascii=False)
         try:
             await conv_mgr.update_conversation(umo, curr_cid, history=history_list)
@@ -203,11 +221,12 @@ class TailWavePlugin(Star):
             return []
 
     def _extract_proactive_bubbles_from_history(self, history_list: List[dict]) -> List[str]:
-        """从表面上下文历史中提取所有已归档的主动消息气泡"""
+        """从表面上下文近期历史中提取已归档的主动消息气泡"""
         extracted: List[str] = []
-        for i in range(len(history_list) - 1):
-            curr_item = history_list[i]
-            next_item = history_list[i + 1]
+        recent_slice = history_list[-40:] if len(history_list) > 40 else history_list
+        for i in range(len(recent_slice) - 1):
+            curr_item = recent_slice[i]
+            next_item = recent_slice[i + 1]
             if (
                 curr_item.get("role") == "user"
                 and self._is_proactive_marker(str(curr_item.get("content", "")))
@@ -218,7 +237,7 @@ class TailWavePlugin(Star):
                     line_s = line.strip()
                     if line_s and line_s not in extracted:
                         extracted.append(line_s)
-        return extracted
+        return extracted[-20:]
 
     async def _append_proactive_bubble_to_surface(self, umo: str, seg: str, turn_index: int = 1):
         """
