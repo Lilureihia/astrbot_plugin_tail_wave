@@ -19,7 +19,7 @@ PROACTIVE_RECORD_PREFIX = "（对话框聊天记录：刚才我安静未打字�
     "astrbot_plugin_tail_wave",
     "白昼夢",
     "支持拟人连环气泡、打断机制与昼夜心境轮盘的主动私聊插件",
-    "2.1.0",
+    "2.1.1",
 )
 class TailWavePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -90,7 +90,7 @@ class TailWavePlugin(Star):
         self._ensure_loop_started()
 
         logger.info(
-            f"[猫尾电波 Tail-Wave v2.1.0] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}"
+            f"[猫尾电波 Tail-Wave v2.1.1] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}"
         )
 
     def _migrate_proactive_prompt(self, raw_prompt: str) -> str:
@@ -515,7 +515,7 @@ class TailWavePlugin(Star):
         cached_list = self._get_cached_bubble_list(self.target_umo) if self.target_umo else []
 
         msg = (
-            f"🐾 【猫尾电波 Tail-Wave v2.1.0】\n"
+            f"🐾 【猫尾电波 Tail-Wave v2.1.1】\n"
             f"• 绑定会话：{self.target_umo or '未绑定(私聊一次即可自动捕获)'}\n"
             f"• 绑定用户：{self.target_user_id or '未绑定'}\n"
             f"• 当前心境状态：{mood_preview}\n"
