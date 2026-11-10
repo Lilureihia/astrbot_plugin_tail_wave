@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import datetime
 import json
@@ -19,7 +20,7 @@ PROACTIVE_RECORD_PREFIX = "（对话框聊天记录：刚才我安静未打字�
     "astrbot_plugin_tail_wave",
     "白昼夢",
     "支持拟人连环气泡、打断机制与昼夜心境轮盘的主动私聊插件",
-    "2.1.1",
+    "2.1.2",
 )
 class TailWavePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -55,13 +56,30 @@ class TailWavePlugin(Star):
         self.phase_4_time: str = str(self.config.get("phase_4_time", "18:00-24:00")).strip()
         self.phase_4_prompt: str = str(self.config.get("phase_4_prompt", "")).strip()
 
+        xml_tags = r"(?:thought|think|thinking|feedback|analysis|reasoning|inner_thought|reflection|scratchpad|meta|rule|system)"
+        # 1. 完整闭合的思考块
         self._re_xml_block = re.compile(
-            r"<(thought|think|thinking|feedback|analysis|reasoning|inner_thought|reflection|scratchpad|meta|rule|system)\b[^>]*>[\s\S]*?</\1>",
+            rf"<({xml_tags})\b[^>]*>[\s\S]*?</\1>",
             re.IGNORECASE,
         )
-        self._re_xml_orphan = re.compile(
-            r"</?(?:thought|think|thinking|feedback|analysis|reasoning|inner_thought|reflection|scratchpad|meta|rule|system)\b[^>]*>",
+        # 2. 预填开头导致缺失左标签、仅剩右闭合标签的前缀思考块（如 ...思考内容...</think>正文）
+        self._re_xml_close_prefix = re.compile(
+            rf"^[\s\S]*</{xml_tags}\b[^>]*>",
             re.IGNORECASE,
+        )
+        # 3. 缺失右闭合标签的尾部截断思考块（如 正文<think>未闭合思考...）
+        self._re_xml_open_suffix = re.compile(
+            rf"<{xml_tags}\b[^>]*>[\s\S]*$",
+            re.IGNORECASE,
+        )
+        # 4. 孤立残留标签
+        self._re_xml_orphan = re.compile(
+            rf"</?{xml_tags}\b[^>]*>",
+            re.IGNORECASE,
+        )
+        # 5. 匹配被序列化成字符串的 [{'type': 'text', 'text': '...'}] 结构
+        self._re_dict_list_str = re.compile(
+            r"\[\s*\{\s*['\"]type['\"]\s*:\s*['\"]text['\"]\s*,\s*['\"]text['\"]\s*:\s*(['\"])([\s\S]*?)\1\s*\}\s*\]"
         )
 
         raw_prompt = str(self.config.get("proactive_prompt", DEFAULT_USER_PROMPT))
@@ -90,8 +108,52 @@ class TailWavePlugin(Star):
         self._ensure_loop_started()
 
         logger.info(
-            f"[猫尾电波 Tail-Wave v2.1.1] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}"
+            f"[猫尾电波 Tail-Wave v2.1.2] 插件已启动！当前目标UMO: {self.target_umo or '未绑定(等待私聊自动捕获)'}"
         )
+
+    def _extract_content_text(self, content) -> str:
+        """
+        安全从 str、多模态 list/dict 或已被污染的 "[{'type': 'text', 'text': '...'}]" 字符串中提取纯文本。
+        """
+        if content is None:
+            return ""
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type", "text") == "text" and "text" in item:
+                        parts.append(str(item.get("text", "")))
+                    elif "content" in item:
+                        parts.append(self._extract_content_text(item.get("content")))
+                elif isinstance(item, str):
+                    parts.append(self._extract_content_text(item))
+            return "".join(parts).strip()
+
+        if isinstance(content, dict):
+            if "text" in content:
+                return str(content.get("text", "")).strip()
+            if "content" in content:
+                return self._extract_content_text(content.get("content"))
+            return ""
+
+        text = str(content).strip()
+        if not text:
+            return ""
+
+        # 修复已被 str(list) 污染的 "[{'type': 'text', 'text': '...'}]" 或 JSON 数组字符串
+        if text.startswith("[") and ("'text'" in text or '"text"' in text):
+            for parser in (json.loads, ast.literal_eval):
+                try:
+                    parsed = parser(text)
+                    if isinstance(parsed, list):
+                        extracted = self._extract_content_text(parsed)
+                        if extracted:
+                            return extracted
+                except Exception:
+                    pass
+            text = self._re_dict_list_str.sub(r"\2", text).strip()
+
+        return text
 
     def _migrate_proactive_prompt(self, raw_prompt: str) -> str:
         if not raw_prompt or not raw_prompt.strip():
@@ -111,7 +173,7 @@ class TailWavePlugin(Star):
         return cleaned
 
     def _load_cache(self):
-        """从 data/plugin_data/astrbot_plugin_tail_wave 加载运行时缓存与状态"""
+        """从 data/plugin_data/astrbot_plugin_tail_wave 加载运行时缓存与状态，并自动净化历史污染项"""
         if not os.path.exists(self.cache_file):
             return
         try:
@@ -120,8 +182,30 @@ class TailWavePlugin(Star):
             if isinstance(data, dict):
                 c_data = data.get("plugin_cache", {})
                 p_data = data.get("proactive_pending", {})
-                self.plugin_cache = c_data if isinstance(c_data, dict) else {}
+                raw_cache = c_data if isinstance(c_data, dict) else {}
                 self.proactive_pending = p_data if isinstance(p_data, dict) else {}
+
+                cleaned_cache = {}
+                dirty = False
+                for k, v in raw_cache.items():
+                    if isinstance(v, list):
+                        deduped = []
+                        for item in v:
+                            pure = self._extract_content_text(item)
+                            if pure and pure not in deduped:
+                                deduped.append(pure)
+                            if pure != str(item).strip():
+                                dirty = True
+                        if deduped:
+                            cleaned_cache[k] = deduped[-20:]
+                    elif isinstance(v, str) and v.strip():
+                        pure = self._extract_content_text(v)
+                        if pure:
+                            cleaned_cache[k] = [pure]
+                            dirty = True
+                self.plugin_cache = cleaned_cache
+                if dirty:
+                    self._save_cache()
         except Exception as e:
             logger.warning(f"[猫尾电波] 读取运行时缓存文件异常，已初始化为空: {e}")
             self.plugin_cache = {}
@@ -143,15 +227,28 @@ class TailWavePlugin(Star):
     def _get_cached_bubble_list(self, umo: str) -> List[str]:
         """获取小本本中记录的主动气泡列表"""
         raw = self.plugin_cache.get(umo, [])
+        result: List[str] = []
         if isinstance(raw, list):
-            return [str(x).strip() for x in raw if str(x).strip()]
+            for x in raw:
+                pure = self._extract_content_text(x)
+                if pure and pure not in result:
+                    result.append(pure)
+            return result
         if isinstance(raw, str) and raw.strip():
-            return [line.strip() for line in raw.split("\n") if line.strip()]
+            for line in raw.split("\n"):
+                pure = self._extract_content_text(line)
+                if pure and pure not in result:
+                    result.append(pure)
+            return result
         return []
 
     def _set_cached_bubble_list(self, umo: str, bubbles: List[str]):
         """更新小本本中的主动气泡列表"""
-        cleaned = [str(x).strip() for x in bubbles if str(x).strip()]
+        cleaned: List[str] = []
+        for x in bubbles:
+            pure = self._extract_content_text(x)
+            if pure and pure not in cleaned:
+                cleaned.append(pure)
         if cleaned:
             self.plugin_cache[umo] = cleaned[-20:]
         else:
@@ -167,7 +264,7 @@ class TailWavePlugin(Star):
         return content.startswith(PROACTIVE_RECORD_PREFIX) or content.startswith("[系统场景：搭档当前安静未发言")
 
     def _parse_raw_history(self, raw_h) -> List[dict]:
-        """安全解析 AstrBot 的 conv.history，自动修复可能被双重 JSON 编码的历史数据"""
+        """安全解析 AstrBot 的 conv.history，自动修复可能被双重 JSON 编码或字符串污染的历史数据"""
         if not raw_h:
             return []
         data = raw_h
@@ -180,7 +277,15 @@ class TailWavePlugin(Star):
             else:
                 break
         if isinstance(data, list):
-            return [item for item in data if isinstance(item, dict) and "role" in item and "content" in item]
+            valid_list = []
+            for item in data:
+                if isinstance(item, dict) and "role" in item and "content" in item:
+                    c_val = item.get("content")
+                    if isinstance(c_val, str) and c_val.strip().startswith("[{") and "'text'" in c_val:
+                        item = dict(item)
+                        item["content"] = self._extract_content_text(c_val)
+                    valid_list.append(item)
+            return valid_list
         return []
 
     async def _write_history_to_conv(self, conv_mgr, umo: str, curr_cid: str, history_list: List[dict]):
@@ -227,12 +332,13 @@ class TailWavePlugin(Star):
         for i in range(len(recent_slice) - 1):
             curr_item = recent_slice[i]
             next_item = recent_slice[i + 1]
+            curr_text = self._extract_content_text(curr_item.get("content", ""))
             if (
                 curr_item.get("role") == "user"
-                and self._is_proactive_marker(str(curr_item.get("content", "")))
+                and self._is_proactive_marker(curr_text)
                 and next_item.get("role") == "assistant"
             ):
-                text = str(next_item.get("content", "")).strip()
+                text = self._extract_content_text(next_item.get("content", ""))
                 for line in text.split("\n"):
                     line_s = line.strip()
                     if line_s and line_s not in extracted:
@@ -243,9 +349,10 @@ class TailWavePlugin(Star):
         """
         将单条主动气泡实时同步至表面历史：
         每条主动气泡以独立的 `user(对话框聊天记录说明) -> assistant(气泡正文)` 结对写入，
-        不合并、不使用“[系统场景]”字样，让大模型 100% 识别为对话框内真实发出的聊天消息。
+        不合并、不使用“[系统场景]”字样，让大模型识别为对话框内真实发出的聊天消息。
         """
-        if not seg:
+        seg_clean = self._extract_content_text(seg)
+        if not seg_clean:
             return
         conv_mgr = getattr(self.context, "conversation_manager", None)
         if not conv_mgr:
@@ -261,17 +368,17 @@ class TailWavePlugin(Star):
             if (
                 len(history_list) >= 2
                 and history_list[-1].get("role") == "assistant"
-                and str(history_list[-1].get("content", "")).strip() == seg
+                and self._extract_content_text(history_list[-1].get("content", "")) == seg_clean
             ):
                 return
 
             marker = self._build_proactive_user_marker(turn_index)
             history_list.append({"role": "user", "content": marker})
-            history_list.append({"role": "assistant", "content": seg})
+            history_list.append({"role": "assistant", "content": seg_clean})
 
             await self._write_history_to_conv(conv_mgr, umo, curr_cid, history_list)
             logger.info(
-                f"[猫尾电波] 💾 主动气泡已实时同步至表面上下文 (当前表面记录数: {len(history_list)}): {seg}"
+                f"[猫尾电波] 💾 主动气泡已实时同步至表面上下文 (当前表面记录数: {len(history_list)}): {seg_clean}"
             )
         except Exception as e:
             logger.error(f"[猫尾电波] 实时同步主动气泡失败: {e}")
@@ -288,24 +395,24 @@ class TailWavePlugin(Star):
             live_conv = await conv_mgr.get_conversation(umo, curr_cid)
             history_list = self._parse_raw_history(live_conv.history if live_conv else None)
 
-            # 双向核验：确保小本本里的主动气泡 100% 存在于表面历史中（哪边少就补齐哪边）
+            # 双向核验：确保小本本里的主动气泡存在于表面历史中（哪边少就补齐哪边）
             cached_bubbles = self._get_cached_bubble_list(umo)
-            surface_Assistant_texts = [
-                str(item.get("content", "")).strip()
+            surface_assistant_texts = [
+                self._extract_content_text(item.get("content", ""))
                 for item in history_list
                 if item.get("role") == "assistant"
             ]
             missing_idx = 1
             for b_text in cached_bubbles:
-                if not any(b_text in s_text for s_text in surface_Assistant_texts):
+                if not any(b_text in s_text for s_text in surface_assistant_texts):
                     history_list.append({"role": "user", "content": self._build_proactive_user_marker(missing_idx)})
                     history_list.append({"role": "assistant", "content": b_text})
                 missing_idx += 1
 
             if user_text:
-                history_list.append({"role": "user", "content": user_text})
+                history_list.append({"role": "user", "content": self._extract_content_text(user_text)})
             if bot_text:
-                history_list.append({"role": "assistant", "content": bot_text})
+                history_list.append({"role": "assistant", "content": self._extract_content_text(bot_text)})
 
             await self._write_history_to_conv(conv_mgr, umo, curr_cid, history_list)
             logger.info(
@@ -352,7 +459,7 @@ class TailWavePlugin(Star):
 
         # 情况 B：小本本中有主动气泡，但表面历史里少了 -> 补齐到表面历史
         surface_assistant_texts = [
-            str(item.get("content", "")).strip()
+            self._extract_content_text(item.get("content", ""))
             for item in history_list
             if item.get("role") == "assistant"
         ]
@@ -394,36 +501,163 @@ class TailWavePlugin(Star):
             high = low
         return random.randint(max(10, low), max(10, high))
 
+    def _is_quote_balanced(self, text: str, open_q: str, close_q: str) -> bool:
+        """检查非对称引号（如“”或‘’）在文本内部是否成对平衡"""
+        balance = 0
+        for ch in text:
+            if ch == open_q:
+                balance += 1
+            elif ch == close_q:
+                balance -= 1
+                if balance < 0:
+                    return False
+        return balance == 0
+
+    def _clean_edge_quotes(self, text: str) -> str:
+        """
+        智能维护首尾引号平衡与半边残缺自愈：
+        1. 清理首尾残留的反引号；
+        2. 若整句被成对引号完整包裹（且剥离后内部依然平衡），则剥离最外层冗余引号；
+        3. 若属于“动作描写：“台词””这类中间开口、末尾闭合的平衡结构，完整保留成对引号，绝不误删句末右引号；
+        4. 若存在单侧缺失的未闭合引号，自动补全闭合引号或剥离首尾孤立引号。
+        """
+        if not text:
+            return ""
+        s = re.sub(r"^[`]+|[`]+$", "", text.strip()).strip()
+        if not s:
+            return ""
+
+        # 1. 仅当整句被一对最外层引号完整包裹（剥离后内部依然平衡）时，才剥离外层引号
+        paired_quotes = [("“", "”"), ("‘", "’"), ('"', '"'), ("'", "'")]
+        changed = True
+        while changed and len(s) >= 2:
+            changed = False
+            for oq, cq in paired_quotes:
+                if s.startswith(oq) and s.endswith(cq):
+                    inner = s[1:-1].strip()
+                    if oq != cq:
+                        if self._is_quote_balanced(inner, oq, cq):
+                            s = inner
+                            changed = True
+                            break
+                    else:
+                        if inner.count(oq) == 0:
+                            s = inner
+                            changed = True
+                            break
+
+        # 2. 处理中式弯引号（“” / ‘’）的半边缺失自愈或首尾孤立剥离
+        for oq, cq in [("“", "”"), ("‘", "’")]:
+            o_cnt, c_cnt = s.count(oq), s.count(cq)
+            if o_cnt == 1 and c_cnt == 0:
+                if s.startswith(oq):
+                    s = s[1:].strip()
+                else:
+                    s = s + cq
+            elif c_cnt == 1 and o_cnt == 0:
+                if s.endswith(cq):
+                    s = s[:-1].strip()
+                else:
+                    s = oq + s
+
+        # 3. 处理英式直引号（" / '）的奇数孤立残留或冒号后未闭合补全
+        for q in ('"', "'"):
+            if s.count(q) % 2 == 1:
+                if s.startswith(q):
+                    s = s[1:].strip()
+                elif s.endswith(q):
+                    s = s[:-1].strip()
+                elif f"：{q}" in s or f":{q}" in s:
+                    s = s + q
+
+        return s.strip()
+
     def _clean_llm_output(self, text: str) -> str:
         if not text:
             return ""
+        # 1. 剥离完整闭合块、预填残缺左标签的前缀思考块、未闭合右标签的尾部思考块及孤立标签
         cleaned = self._re_xml_block.sub("", text)
+        cleaned = self._re_xml_close_prefix.sub("", cleaned)
+        cleaned = self._re_xml_open_suffix.sub("", cleaned)
         cleaned = self._re_xml_orphan.sub("", cleaned)
+
+        # 2. 还原可能被模型复读出来的 [{'type': 'text', 'text': '...'}] 字符串
+        cleaned = self._re_dict_list_str.sub(r"\2", cleaned)
         cleaned = cleaned.strip()
         if not cleaned:
             return ""
+
         lines = cleaned.split("\n")
         filtered_lines = []
         for line in lines:
             line_str = line.strip()
-            if re.search(r"(?:let'?s\s*use|characters?|words?|个?字)", line_str, re.IGNORECASE):
+            if not line_str:
+                continue
+
+            # 过滤包含控制暗号解释说明的思考废话行（保留纯粹输出暗号本身的行供外层判断）
+            if ("[TAIL_WAVE_PASS]" in line_str or "[TAIL_WAVE_STOP]" in line_str) and len(line_str) > 24:
+                continue
+
+            # 精确匹配英文 Let's use 引导或带数字的字数统计标注，绝不误伤含“字”的正常对话
+            if re.search(
+                r"(?:let'?s\s*use[:：]|\b\d+\s*(?:chars?|words?|characters?)\b|[\(（\[]\s*(?:约|大概|共)?\s*\d+\s*个?字\s*[\)）\]])",
+                line_str,
+                re.IGNORECASE,
+            ):
                 line_str = re.sub(r"^.*?(?:let'?s\s*use[:：]\s*[`'\"“]?)", "", line_str, flags=re.IGNORECASE)
                 line_str = re.sub(
-                    r"\s*[`'\"”]?\s*[\(（]?\d*\s*(?:chars?|words?|characters?|个?字)?[\)）]?\s*$",
+                    r"\s*[`'\"”]?\s*[\(（\[]?\s*(?:约|大概|共)?\s*\d+\s*(?:chars?|words?|characters?|个?字)\s*[\)）\]]?\s*$",
                     "",
                     line_str,
                     flags=re.IGNORECASE,
                 )
                 if not line_str.strip() or "let's use" in line_str.lower():
                     continue
+
             if re.match(r"^(?:Perfect\.?|OK\.?|Pass\.?|->|-&gt;|\d+|\(.*\))+[\s\.\!]*$", line_str, re.IGNORECASE):
                 continue
-            filtered_lines.append(line_str)
-        cleaned = "\n".join(filtered_lines).strip()
+            filtered_lines.append(self._clean_edge_quotes(line_str))
+
+        cleaned = "\n".join([l for l in filtered_lines if l]).strip()
         if not cleaned:
             return ""
-        cleaned = re.sub(r"^[`'\"“]+|[`'\"”]+$", "", cleaned).strip()
-        return cleaned.strip()
+        return self._clean_edge_quotes(cleaned)
+
+    def _is_control_token(self, cleaned_text: str, token: str) -> bool:
+        """
+        严格判定模型是否真正输出了控制暗号（如 [TAIL_WAVE_PASS] 或 [TAIL_WAVE_STOP]），
+        防止模型在思考分析中提及“不需要输出 [TAIL_WAVE_PASS]”时发生误触发。
+        """
+        if not cleaned_text or token not in cleaned_text:
+            return False
+        stripped = re.sub(r"[\s`'\"“”‘’。！!？\?\.,，、：:；;（）\(\)]", "", cleaned_text)
+        if stripped == token:
+            return True
+        for line in cleaned_text.split("\n"):
+            l_strip = line.strip()
+            if token in l_strip:
+                if re.search(r"(?:不|无需|不用|并非|不是|别|not|don'?t|never)", l_strip, re.IGNORECASE):
+                    continue
+                if len(l_strip) <= len(token) + 6:
+                    return True
+        return False
+
+    def _pick_single_bubble_line(self, cleaned_text: str) -> str:
+        """在主动连击或主动收尾时，提取最干净的单句回复（若有多行残留草稿，优先取最终定稿行）"""
+        if not cleaned_text:
+            return ""
+        lines = [
+            self._clean_edge_quotes(l)
+            for l in cleaned_text.split("\n")
+            if l.strip() and "[TAIL_WAVE_" not in l
+        ]
+        lines = [l for l in lines if l]
+        if not lines:
+            return ""
+        if len(lines) == 1:
+            return lines[0]
+        # 若模型在未加标签的情况下先列了多句草稿再敲定最终句，最后一行往往是针对当前情境的最终定稿
+        return lines[-1]
 
     def _is_private_chat(self, event: AstrMessageEvent) -> bool:
         umo = str(event.unified_msg_origin or "")
@@ -515,7 +749,7 @@ class TailWavePlugin(Star):
         cached_list = self._get_cached_bubble_list(self.target_umo) if self.target_umo else []
 
         msg = (
-            f"🐾 【猫尾电波 Tail-Wave v2.1.1】\n"
+            f"🐾 【猫尾电波 Tail-Wave v2.1.2】\n"
             f"• 绑定会话：{self.target_umo or '未绑定(私聊一次即可自动捕获)'}\n"
             f"• 绑定用户：{self.target_user_id or '未绑定'}\n"
             f"• 当前心境状态：{mood_preview}\n"
@@ -621,8 +855,8 @@ class TailWavePlugin(Star):
             if provider:
                 prompt = (
                     f"[情境：你刚才在对话框里主动向搭档发了：“{last_proactive_bubble}”，搭档随即回复：“{original_msg}”。]\n"
-                    f"遵循你的既定人设，自主决定如何处理这句回复：\n"
-                    f"- 若这是对你刚才主动消息的顺承回应或打断互动，请直接输出一小句简短自然的接话（20字以内），完成本次主动互动收尾；\n"
+                    f"遵循你的既定人设，自主决定如何处理这句回复（严禁输出任何思考过程、多行备选草稿或分析）：\n"
+                    f"- 若这是对你刚才主动消息的顺承回应或打断互动，请直接输出唯一一句简短自然的接话（20字以内），完成本次主动互动收尾；\n"
                     f"- 若话题已自然结束无需再回，仅严格输出暗号：[TAIL_WAVE_STOP]\n"
                     f"- 若搭档说的完全是另一个需要长篇解答的全新独立问题（如要求测试上下文、写代码等），仅严格输出暗号：[TAIL_WAVE_PASS]"
                 )
@@ -647,30 +881,30 @@ class TailWavePlugin(Star):
                     )
                     raw_reply = self._clean_llm_output(llm_resp.completion_text or "")
 
-                    if "[TAIL_WAVE_PASS]" in raw_reply:
+                    if self._is_control_token(raw_reply, "[TAIL_WAVE_PASS]"):
                         logger.info("[猫尾电波] 🔄 判定为全新独立提问，主动模式即时退场，无缝交由被动模式解答！")
                         self._refresh_active_timer(reason="对话互动")
                         return
 
-                    if raw_reply and "[TAIL_WAVE_STOP]" not in raw_reply:
-                        lines = [l.strip() for l in raw_reply.split("\n") if l.strip()]
-                        short_reply = lines[0] if lines else raw_reply.strip()
-                        logger.info(f"[猫尾电波] ⚡ 主动闭环决定接话 (1): {short_reply}")
-                        self._refresh_active_timer(reason="对话互动")
-                        await self._sync_surface_history(umo, user_text=original_msg, bot_text=short_reply)
-                        event.message_str = ""
-                        yield event.plain_result(short_reply)
-                        if hasattr(event, "stop_event") and callable(event.stop_event):
-                            event.stop_event()
-                        return
-                    else:
-                        logger.info("[猫尾电波] ⚡ 主动闭环决定不接话 (0)，同步用户回复后静默结束主动周期。")
-                        self._refresh_active_timer(reason="对话互动")
-                        await self._sync_surface_history(umo, user_text=original_msg, bot_text="")
-                        event.message_str = ""
-                        if hasattr(event, "stop_event") and callable(event.stop_event):
-                            event.stop_event()
-                        return
+                    if raw_reply and not self._is_control_token(raw_reply, "[TAIL_WAVE_STOP]"):
+                        short_reply = self._pick_single_bubble_line(raw_reply)
+                        if short_reply:
+                            logger.info(f"[猫尾电波] ⚡ 主动闭环决定接话 (1): {short_reply}")
+                            self._refresh_active_timer(reason="对话互动")
+                            await self._sync_surface_history(umo, user_text=original_msg, bot_text=short_reply)
+                            event.message_str = ""
+                            if hasattr(event, "stop_event") and callable(event.stop_event):
+                                event.stop_event()
+                            yield event.plain_result(short_reply)
+                            return
+
+                    logger.info("[猫尾电波] ⚡ 主动闭环决定不接话 (0)，同步用户回复后静默结束主动周期。")
+                    self._refresh_active_timer(reason="对话互动")
+                    await self._sync_surface_history(umo, user_text=original_msg, bot_text="")
+                    event.message_str = ""
+                    if hasattr(event, "stop_event") and callable(event.stop_event):
+                        event.stop_event()
+                    return
                 except Exception as e:
                     logger.error(f"[猫尾电波] 主动互动闭环生成失败，平滑退回被动模式: {e}")
 
@@ -764,7 +998,7 @@ class TailWavePlugin(Star):
         if not isinstance(self.proactive_pending, dict):
             self.proactive_pending = {}
 
-        # 🌟 发主动消息前第 1 道检查：先做双向同步对账（确保表面上下文与小本本 100% 同步）
+        # 🌟 发主动消息前第 1 道检查：先做双向同步对账（确保表面上下文与小本本同步）
         await self._reconcile_memory_sync(umo, is_reset_cmd=False)
         was_unanswered = bool(self.proactive_pending.get(umo, False))
         prev_proactive_list = self._get_cached_bubble_list(umo)
@@ -839,7 +1073,7 @@ class TailWavePlugin(Star):
                 mood_block = f"\n{mood_context}" if mood_context else ""
 
                 base_soul_guard = (
-                    "保持你当前的人设性格。自然、松弛、简短（单句20字以内），只输出你当下想发给搭档的一小句短消息，不要自问自答。"
+                    "保持你当前的人设性格。自然、松弛、简短（单句20字以内），只输出你当下想发给搭档的唯一一小句短消息，不要自问自答或输出多行备选。"
                 )
                 user_guidance = self.proactive_prompt.strip()
                 user_block = f"\n补充指引：{user_guidance}" if user_guidance else ""
@@ -903,7 +1137,7 @@ class TailWavePlugin(Star):
 
                 raw_text = self._clean_llm_output(llm_resp.completion_text or "")
 
-                if not raw_text or stop_token in raw_text:
+                if not raw_text or self._is_control_token(raw_text, stop_token):
                     if is_forced_continue:
                         cleaned_retry = raw_text.replace(stop_token, "").strip() if raw_text else ""
                         if not cleaned_retry:
@@ -918,8 +1152,7 @@ class TailWavePlugin(Star):
                         logger.info(f"[猫尾电波] ✨ 已满足最小保底期望 ({delivered_so_far} 句)，模型自主收尾结束连击。")
                         break
 
-                lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
-                seg = lines[0] if lines else raw_text.strip()
+                seg = self._pick_single_bubble_line(raw_text)
                 if not seg:
                     continue
 
